@@ -5,22 +5,32 @@ from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
-# Load .env from project root
 load_dotenv()
 
 
 @dataclass
 class NamecheapSettings:
-    # Kept for future Namecheap integration, not used right now.
-    api_user: str | None = os.environ.get("NAMECHEAP_API_USER")
+    # Official Namecheap API credentials
+    api_user: str | None = os.environ.get("NAMECHEAP_API_USER")    # usually your NC username
     api_key: str | None = os.environ.get("NAMECHEAP_API_KEY")
-    username: str | None = os.environ.get("NAMECHEAP_USERNAME")
+    username: str | None = os.environ.get("NAMECHEAP_USERNAME")    # often same as api_user
     client_ip: str | None = os.environ.get("NAMECHEAP_CLIENT_IP")
+
+    # Use sandbox or production
+    use_sandbox: bool = os.environ.get("NAMECHEAP_USE_SANDBOX", "true").lower() == "true"
+
+    @property
+    def base_url(self) -> str:
+        # Sandbox vs production endpoints
+        if self.use_sandbox:
+            return "https://api.sandbox.namecheap.com/xml.response"
+        return "https://api.namecheap.com/xml.response"
 
 
 @dataclass
 class DomainResearchSettings:
-    fastly_api_token: str = os.environ["FASTLY_API_TOKEN"]  # required
+    # You can keep this for legacy Fastly behavior if you want
+    fastly_api_token: str | None = os.environ.get("FASTLY_API_TOKEN")
 
 
 @dataclass
