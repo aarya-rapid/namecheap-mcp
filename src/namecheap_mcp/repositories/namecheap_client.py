@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any
 
 import httpx
 
 from ..config import domain_research_settings
-
-# Fastly Domain Research API status endpoint
-STATUS_ENDPOINT = "https://api.fastly.com/domain-management/v1/tools/status"
 
 
 @dataclass
@@ -16,7 +13,7 @@ class DomainCheckResult:
     domain: str
     available: bool
     is_premium: bool
-    attrs: Dict[str, str]
+    attrs: Dict[str, Any]
 
     @property
     def tld(self) -> str:
@@ -26,42 +23,98 @@ class DomainCheckResult:
         return ""
 
     def get_price(self, key: str) -> Optional[float]:
-        # Domain Research does not provide registrar pricing; keep this
-        # for future Namecheap/Porkbun integration.
-        return None
+        """
+        DomainSearchService expects Namecheap-style keys like:
+        - PremiumRegistrationPrice
+        - PremiumRenewalPrice
+        - PremiumTransferPrice
+        - PremiumRestorePrice
+        - IcannFee
+
+        We'll stash Porkbun's pricing in attrs under those keys as strings
+        and convert to float here.
+        """
+        raw = self.attrs.get(key)
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
 
 
 class NamecheapClient:
     """
-    Domain availability client using Fastly's Domain Research Status API.
+    Domain availability client backed by Porkbun's Domain Check API.
 
-    We keep the same interface as before so the DomainSearchService doesn't change.
+    We keep the same interface as before so DomainSearchService and the MCP tools
+    don't need to change at all.
     """
 
     def __init__(self) -> None:
-        self._token = domain_research_settings.fastly_api_token
+        self._api_key = domain_research_settings.porkbun_api_key
+        self._secret_key = domain_research_settings.porkbun_secret_api_key
+        self._base_url = domain_research_settings.porkbun_api_base.rstrip("/")
 
-    async def _check_single_domain(self, client: httpx.AsyncClient, domain: str) -> DomainCheckResult:
-        # We use scope=estimate (common for "is it registrable?")
-        params = {
-            "domain": domain,
-            "scope": "estimate",
+        if not self._api_key or not self._secret_key:
+            raise RuntimeError(
+                "Porkbun API credentials are not configured. "
+                "Set PORKBUN_API_KEY and PORKBUN_SECRET_API_KEY in your environment."
+            )
+
+    def _auth_body(self) -> Dict[str, str]:
+        return {
+            "apikey": self._api_key,
+            "secretapikey": self._secret_key,
         }
-        headers = {
-            "Fastly-Key": self._token,
-            "Accept": "application/json",
+
+    async def _check_single_domain(
+        self,
+        client: httpx.AsyncClient,
+        domain: str,
+    ) -> DomainCheckResult:
+        """
+        Uses Porkbun Domain Check:
+
+        POST {base}/domain/checkDomain/{domain}
+        JSON body: { apikey, secretapikey }
+
+        Example successful response: :contentReference[oaicite:0]{index=0}
+        {
+          "status": "SUCCESS",
+          "response": {
+            "avail": "no",
+            "type": "registration",
+            "price": "1.01",
+            "firstYearPromo": "yes",
+            "regularPrice": "11.82",
+            "premium": "no",
+            "additional": {
+              "renewal": { "type": "renewal", "price": "11.82", "regularPrice": "11.82" },
+              "transfer": { "type": "transfer", "price": "11.82", "regularPrice": "11.82" }
+            }
+          },
+          "limits": {
+            "TTL": "10",
+            "limit": "1",
+            "used": 1,
+            "naturalLanguage": "1 out of 1 checks within 10 seconds used."
+          }
         }
+        """
+
+        url = f"{self._base_url}/domain/checkDomain/{domain}"
 
         try:
-            resp = await client.get(STATUS_ENDPOINT, params=params, headers=headers, timeout=10)
+            resp = await client.post(url, json=self._auth_body(), timeout=10)
         except httpx.RequestError as e:
-            # Network / DNS / TLS error
+            # Network / DNS / TLS error → treat as unavailable but include error info
             return DomainCheckResult(
                 domain=domain,
                 available=False,
                 is_premium=False,
                 attrs={
-                    "error": "fastly_network_error",
+                    "error": "porkbun_network_error",
                     "detail": str(e),
                 },
             )
@@ -75,7 +128,7 @@ class NamecheapClient:
                 available=False,
                 is_premium=False,
                 attrs={
-                    "error": "fastly_http_error",
+                    "error": "porkbun_http_error",
                     "status_code": str(resp.status_code),
                     "body": text,
                 },
@@ -89,57 +142,67 @@ class NamecheapClient:
                 available=False,
                 is_premium=False,
                 attrs={
-                    "error": "fastly_json_error",
+                    "error": "porkbun_json_error",
                     "detail": str(e),
                     "body": resp.text[:300],
                 },
             )
 
-        # Domain status object: { domain, offers, scope, status, tags, zone } :contentReference[oaicite:3]{index=3}
-        entry = data
+        if data.get("status") != "SUCCESS":
+            # Porkbun-level error (bad auth, rate limit, etc.)
+            return DomainCheckResult(
+                domain=domain,
+                available=False,
+                is_premium=False,
+                attrs={
+                    "error": "porkbun_api_error",
+                    "message": str(data.get("message") or data),
+                },
+            )
+
+        response = data.get("response") or {}
+        limits = data.get("limits") or {}
+
+        # --- map availability / premium flags ---
+
+        avail_str = str(response.get("avail", "")).lower()  # "yes" / "no"
+        available = (avail_str == "yes")
+        is_premium = str(response.get("premium", "")).lower() == "yes"
+
+        # --- build attrs, ensuring all values are strings ---
 
         attrs: Dict[str, str] = {}
-        available = False
-        is_premium = False
 
-        raw_status = str(entry.get("status", ""))  # e.g. "undelegated inactive"
-        attrs["fastly_status"] = raw_status
+        def _set_attr(key: str, value: Any) -> None:
+            if value is not None:
+                attrs[key] = str(value)
 
-        # Status is a space-delimited list, right-most = highest priority. :contentReference[oaicite:4]{index=4}
-        tokens = [t.strip().lower() for t in raw_status.split() if t.strip()]
-        token_set = set(tokens)
-        primary = tokens[-1] if tokens else ""
+        # raw Porkbun fields for debugging / transparency
+        _set_attr("porkbun_avail", avail_str)
+        _set_attr("porkbun_type", response.get("type"))
+        _set_attr("porkbun_firstYearPromo", response.get("firstYearPromo"))
+        _set_attr("porkbun_premium", response.get("premium"))
+        # limits is a dict → stringify it so Pydantic sees a string
+        if limits:
+            _set_attr("porkbun_limits", limits)
 
-        # Determine availability & premium based on docs:
-        #
-        # Available for registration:
-        #   - any status containing "inactive"
-        #   - OR exactly "undelegated" (your expected behavior)
-        #
-        # Not available for immediate registration:
-        #   - active, parked, marketed, premium, claimed, reserved, dpml,
-        #     invalid, disallowed, pending, expiring, deleting, priced,
-        #     transferable, suffix, zone, tld, unknown, etc. :contentReference[oaicite:5]{index=5}
-        #
-        # Premium:
-        #   - "premium" in tokens
+        # map pricing into Namecheap-like keys that DomainSearchService expects
+        price = response.get("price")
+        additional = response.get("additional") or {}
+        renewal = additional.get("renewal") or {}
+        transfer = additional.get("transfer") or {}
 
-        if "inactive" in token_set:
-            available = True
-            is_premium = "premium" in token_set
-        elif token_set == {"undelegated"}:
-            # Domain not in DNS, but no other flags: treat as available for our use case
-            available = True
-            is_premium = False
-        else:
-            # Anything else: treat as not available for new reg
-            available = False
-            is_premium = "premium" in token_set
+        _set_attr("PremiumRegistrationPrice", price)
+        _set_attr("PremiumRenewalPrice", renewal.get("price"))
+        _set_attr("PremiumTransferPrice", transfer.get("price"))
 
-        # Copy some extra fields into attrs for debugging
-        for key in ("domain", "zone", "scope", "tags"):
-            if key in entry:
-                attrs[key] = str(entry[key])
+        # We leave PremiumRestorePrice / IcannFee unset (get_price() → None)
+
+
+        # We don't have direct equivalents for restore/ICANN fee from Porkbun;
+        # leave them absent so get_price() returns None.
+        # attrs["PremiumRestorePrice"] = ...
+        # attrs["IcannFee"] = ...
 
         return DomainCheckResult(
             domain=domain,

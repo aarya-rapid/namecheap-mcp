@@ -20,7 +20,15 @@ class NamecheapSettings:
 
 @dataclass
 class DomainResearchSettings:
-    fastly_api_token: str = os.environ["FASTLY_API_TOKEN"]  # required
+    # Old Fastly token (now optional / unused, but kept for backwards compat)
+    fastly_api_token: str | None = os.environ.get("FASTLY_API_TOKEN")
+
+    # 🔹 NEW: Porkbun API settings
+    porkbun_api_key: str | None = os.environ.get("PORKBUN_API_KEY")
+    porkbun_secret_api_key: str | None = os.environ.get("PORKBUN_SECRET_API_KEY")
+    porkbun_api_base: str = os.environ.get(
+        "PORKBUN_API_BASE", "https://api.porkbun.com/api/json/v3"
+    )
 
 
 @dataclass
