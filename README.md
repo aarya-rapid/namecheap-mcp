@@ -1,56 +1,62 @@
-# Namecheap MCP – Domain Search Server
+# Namecheap MCP – Domain Search Server (Porkbun Variant)
 
-A Model Context Protocol (MCP) server that provides **domain search**, **fuzzy domain suggestions**, and **availability lookup** using **Fastly Domain Research API**, with **Namecheap buy links** for quick purchase.
+A Model Context Protocol (MCP) server that provides **domain search**, **fuzzy domain suggestions**, **availability lookup**, and **pricing estimates** using the **Porkbun Domains API**, while still generating **Namecheap buy links** for the final purchase.
 
-This is designed to be consumed by MCP-compatible clients (e.g., Postman MCP, AI agents).
+This branch is designed for MCP-compatible clients (Postman MCP, VS Code MCP, AI agents, custom assistants).
 
 ---
 
 ## 🚀 Features
 
-- Fuzzy domain search from natural language queries  
-  → `"apple"`, `"cool ai studio"`, `"apple.com"` etc.
-- Exact match detection  
-  → `apple.com`, `apple.io`, `apple.ai`
-- Similar / brandable variations  
-  → `getapple.com`, `tryapple.io`, `applehq.ai`, etc.
-- Live domain availability via **Fastly Domain Research API**
-- Marks premium domains when detected
-- Provides **direct Namecheap buy link** for every suggestion
-- Fully async + fast response time
+- Natural language → domain suggestions  
+  → `"cool ai studio"`, `"apple"`, `"ai tools"`
+- Exact match recognition  
+  → `coolaistudio.com`, `coolaistudio.io`, `coolaistudio.ai`
+- Smart brandable variants  
+  → `getcoolaistudio.com`, `trycoolaistudio.io`, `coolaistudiohq.ai`, etc.
+- Live **availability** lookup using **Porkbun**
+- Returns **real pricing** when available (registration / renewal / transfer)
+- Marks **premium** domains when Porkbun flags them
+- Always includes a **direct Namecheap purchase link** for user checkout
+- Fully async and optimized for fast multi-domain checks
 
 ---
 
-## 🧠 How it works (high-level)
+## 🧠 How it works
 
 | Layer | Purpose |
 |-------|---------|
 | **Controllers** | Expose MCP tools |
-| **Services** | Fuzzy search logic, scoring, result merging |
-| **Repositories** | Fastly Domain Research API integration |
-| **Models** | Pydantic schemas for request/response |
-| **Server** | Boots MCP server via Streamable HTTP transport |
+| **Services** | Fuzzy domain generation, scoring, merging |
+| **Repositories** | Porkbun API integration |
+| **Models** | Pydantic schemas for input/output |
+| **Server** | Runs MCP server using Streamable HTTP |
 
-Fastly API is used only to determine **availability + premium status**.  
-Prices are not included yet, but can be added later (Porkbun, Namecheap API, etc.).
+🟢 Porkbun provides availability + price data  
+🟢 Namecheap is used only for purchase links  
+No automatic purchases are ever triggered.
 
 ---
 
-## 📂 Project Structure
+## 📂 Project structure
 
 ```
+
 namecheap-mcp/
- ├─ src/
- │   └─ namecheap_mcp/
- │       ├─ server.py
- │       ├─ config.py
- │       ├─ controllers/
- │       ├─ services/
- │       ├─ repositories/
- │       ├─ models/
- ├─ pyproject.toml
- ├─ .env.example
- ├─ README.md
+├─ src/
+│   └─ namecheap_mcp/
+│       ├─ server.py
+│       ├─ config.py
+│       ├─ controllers/
+│       ├─ services/
+│       ├─ repositories/
+│       │     ├─ porkbun_client.py
+│       │     └─ namecheap_buy_link.py
+│       ├─ models/
+├─ pyproject.toml
+├─ .env.example
+├─ README.md
+
 ```
 
 ---
@@ -58,62 +64,91 @@ namecheap-mcp/
 ## 🔧 Requirements
 
 - Python 3.12+
-- `uv` (recommended) or Poetry
-- MCP-compatible client (Postman MCP recommended)
+- `uv` or Poetry
+- MCP-compatible client
 
 ---
 
-## 📥 Setup
+## 🔐 Environment setup
 
-1️⃣ Install dependencies
-```sh
-uv sync
+Create a `.env` file in the project root:
+
 ```
 
-2️⃣ Create `.env` file in the project root:
-```env
-FASTLY_API_TOKEN=your_fastly_api_token_here
+PORKBUN_API_KEY=your_porkbun_api_key
+PORKBUN_SECRET_API_KEY=your_porkbun_secret_key
+
 MCP_HOST=0.0.0.0
 MCP_PORT=8000
+
 ```
 
-> `.env` must NOT be committed. It is ignored via `.gitignore`.
+> `.env` is git-ignored — never commit it.
 
-3️⃣ Run the MCP server
-```sh
+---
+
+## ▶️ Running the MCP server
+
+```
+
+uv sync
 uv run python -m namecheap_mcp.server
+
+```
+
+If successful, the server will log something like:
+
+```
+
+StreamableHTTP session manager started
+MCP tools registered: search_domains
+Running on [http://0.0.0.0:8000](http://0.0.0.0:8000)
+
 ```
 
 ---
 
-## 🧪 Testing With Postman MCP
+## 🧪 Testing via Postman MCP
 
 1. Open Postman → **Connect to MCP**
-2. Add connection:
-```
-http://localhost:8000
-```
-3. Call the tool:
-```
-search_domains
+2. Endpoint:
 ```
 
-Example request:
+http://localhost:8000
+
+```
+3. Call tool:
+```
+
+search_domains
+
+````
+
+📌 Example request
 ```json
 {
-  "query": "apple",
-  "tlds": [".com", ".io", ".ai"],
-  "max_results": 25,
-  "include_taken": true
+  "query": "cool ai studio",
+  "max_results": 10
 }
-```
+````
 
-Response includes:
-- `exact_matches`
-- `similar_matches`
-- `available` and `is_premium`
-- `fastly_status` (raw API value)
-- `namecheap_buy_url`
+📌 Response includes
+
+* `exact_matches`
+* `similar_matches`
+* `available`
+* `is_premium`
+* `prices` (from Porkbun)
+* `namecheap_buy_url`
+* `raw` (full Porkbun payload — useful for debugging)
 
 ---
 
+## 📝 Notes
+
+* Porkbun API rate limits apply.
+* Availability lookup + pricing comes from Porkbun only.
+* Checkout remains on Namecheap for convenience.
+* Repository layer is modular: Fastly / Porkbun can be swapped by changing one client.
+
+---
