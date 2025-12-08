@@ -1,38 +1,46 @@
-# Namecheap MCP – Domain Search Server
+# Namecheap MCP – Domain Search Server (Official Namecheap API Variant)
 
-A Model Context Protocol (MCP) server that provides **domain search**, **fuzzy domain suggestions**, and **availability lookup** using **Fastly Domain Research API**, with **Namecheap buy links** for quick purchase.
+[![smithery badge](https://smithery.ai/badge/@aarya-rapid/namecheap-mcp)](https://smithery.ai/server/@aarya-rapid/namecheap-mcp)
 
-This is designed to be consumed by MCP-compatible clients (e.g., Postman MCP, AI agents).
+A Model Context Protocol (MCP) server that provides **domain search**, **fuzzy name suggestions**, and **live availability checks** using the **official Namecheap Domains API**.  
+It also returns **Namecheap buy links** for quick purchase.
+
+This branch currently uses the **Namecheap Sandbox**, meaning:
+- Real availability results are returned
+- Pricing values are often dummy (`0.0`)
+- No money is spent and no domains are registered
+
+Switching to production only requires updating the `.env`.
 
 ---
 
 ## 🚀 Features
 
-- Fuzzy domain search from natural language queries  
-  → `"apple"`, `"cool ai studio"`, `"apple.com"` etc.
+- Natural language → domain name ideas  
+  → `"cool ai studio"`, `"my portfolio"`, `"robotics tools"`
 - Exact match detection  
-  → `apple.com`, `apple.io`, `apple.ai`
-- Similar / brandable variations  
-  → `getapple.com`, `tryapple.io`, `applehq.ai`, etc.
-- Live domain availability via **Fastly Domain Research API**
-- Marks premium domains when detected
-- Provides **direct Namecheap buy link** for every suggestion
-- Fully async + fast response time
+  → `apple.com`, `coolaistudio.io`, etc.
+- Smart branded variants  
+  → `getcoolaistudio.com`, `coolaistudiohq.io`, `trycoolaistudio.ai`
+- Official **Namecheap availability results**
+- Supports **premium domains**
+- **Buy links** auto-generated for each result
+- Fully async and batched queries (efficient usage of API limits)
 
 ---
 
-## 🧠 How it works (high-level)
+## 🧠 Architecture Overview
 
-| Layer | Purpose |
-|-------|---------|
-| **Controllers** | Expose MCP tools |
-| **Services** | Fuzzy search logic, scoring, result merging |
-| **Repositories** | Fastly Domain Research API integration |
-| **Models** | Pydantic schemas for request/response |
-| **Server** | Boots MCP server via Streamable HTTP transport |
+| Layer | Role |
+|-------|-----|
+| **Controllers** | MCP -> service routing |
+| **Services** | Domain generation, similarity scoring, result shaping |
+| **Repositories** | Namecheap XML API integration |
+| **Models** | Pydantic schemas for structured I/O |
+| **Server** | MCP server using streamable HTTP transport |
 
-Fastly API is used only to determine **availability + premium status**.  
-Prices are not included yet, but can be added later (Porkbun, Namecheap API, etc.).
+🟢 **Namecheap API is the source of truth** for domain availability  
+🟢 No purchasing is triggered, only purchase links are generated
 
 ---
 
@@ -40,17 +48,19 @@ Prices are not included yet, but can be added later (Porkbun, Namecheap API, etc
 
 ```
 namecheap-mcp/
- ├─ src/
- │   └─ namecheap_mcp/
- │       ├─ server.py
- │       ├─ config.py
- │       ├─ controllers/
- │       ├─ services/
- │       ├─ repositories/
- │       ├─ models/
- ├─ pyproject.toml
- ├─ .env.example
- ├─ README.md
+├─ src/
+│  ├─ server.py                  # MCP boot / HTTP entrypoint
+│  ├─ constants/
+│  │   └─ schema.py
+│  ├─ helper/
+│  │   └─ config.py
+│  └─ services/
+│      ├─ mcp_provider.py        # Exposes MCP tools to the server
+│      ├─ domain_search_service.py
+│      └─ namecheap_client.py    # Namecheap API client (Sandbox / Prod)
+├─ pyproject.toml
+├─ .env.example
+└─ README.md
 ```
 
 ---
@@ -59,61 +69,107 @@ namecheap-mcp/
 
 - Python 3.12+
 - `uv` (recommended) or Poetry
-- MCP-compatible client (Postman MCP recommended)
+- MCP-compatible client (Postman MCP / VS Code MCP)
 
 ---
 
-## 📥 Setup
+## 🔐 Sandbox Configuration
 
-1️⃣ Install dependencies
-```sh
-uv sync
+Create a `.env`:
+
 ```
+NAMECHEAP_API_USER=your_sandbox_api_user
+NAMECHEAP_API_KEY=your_sandbox_api_key
+NAMECHEAP_USERNAME=your_sandbox_username
+NAMECHEAP_CLIENT_IP=your_public_ip_address
+NAMECHEAP_USE_SANDBOX=true
 
-2️⃣ Create `.env` file in the project root:
-```env
-FASTLY_API_TOKEN=your_fastly_api_token_here
 MCP_HOST=0.0.0.0
 MCP_PORT=8000
 ```
 
-> `.env` must NOT be committed. It is ignored via `.gitignore`.
+> IP must be whitelisted in Namecheap API Access settings.  
+> `.env` is ignored by git — do not commit credentials.
 
-3️⃣ Run the MCP server
-```sh
+---
+
+## ▶️ Run the MCP Server
+
+```
+uv sync
 uv run python -m namecheap_mcp.server
 ```
 
+If everything is set correctly, logs will show:
+
+```
+StreamableHTTP session manager started
+MCP tools registered: search_domains
+Running on [http://0.0.0.0:8000](http://0.0.0.0:8000)
+```
+
 ---
 
-## 🧪 Testing With Postman MCP
+## 🧪 Testing with Postman MCP
 
-1. Open Postman → **Connect to MCP**
-2. Add connection:
+1️⃣ Open Postman → **Connect to MCP**  
+2️⃣ Endpoint:
 ```
 http://localhost:8000
 ```
-3. Call the tool:
+3️⃣ Execute:
 ```
 search_domains
-```
+````
 
-Example request:
+📌 Example request:
 ```json
 {
   "query": "apple",
-  "tlds": [".com", ".io", ".ai"],
-  "max_results": 25,
-  "include_taken": true
+  "max_results": 10
+}
+````
+
+📌 Response fields include:
+
+* `exact_matches`
+* `similar_matches`
+* `available`
+* `is_premium`
+* `prices` (Premium and ICANN fields from Namecheap XML)
+* `namecheap_buy_url`
+* `raw` XML fields → exposed as attributes
+
+Sandbox example:
+
+```json
+"prices": {
+  "premium_registration": 0.0,
+  "premium_renewal": 0.0,
+  "premium_transfer": 0.0,
+  "premium_restore": 0.0,
+  "icann_fee": 0.0
 }
 ```
 
-Response includes:
-- `exact_matches`
-- `similar_matches`
-- `available` and `is_premium`
-- `fastly_status` (raw API value)
-- `namecheap_buy_url`
+Production will return real pricing automatically.
 
 ---
 
+## 📝 Notes
+
+* **No** domains are ever registered automatically.
+
+* Sandbox pricing values are placeholders, **not accurate values**.
+
+* Changing to production requires only:
+
+  ```
+  NAMECHEAP_USE_SANDBOX=false
+  ```
+
+  and updating API credentials (same API calls and functionality).
+
+* Supports batching up to 50 domains per request for optimal throughput.
+
+---
