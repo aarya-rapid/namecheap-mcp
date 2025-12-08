@@ -47,17 +47,18 @@ Switching to production only requires updating the `.env`.
 ```
 namecheap-mcp/
 ├─ src/
-│   └─ namecheap_mcp/
-│       ├─ server.py
-│       ├─ config.py
-│       ├─ controllers/
-│       ├─ services/
-│       ├─ repositories/
-│       │     └─ namecheap_client.py
-│       ├─ models/
+│  ├─ server.py                  # MCP boot / HTTP entrypoint
+│  ├─ constants/
+│  │   └─ schema.py
+│  ├─ helper/
+│  │   └─ config.py
+│  └─ services/
+│      ├─ mcp_provider.py        # Exposes MCP tools to the server
+│      ├─ domain_search_service.py
+│      └─ namecheap_client.py    # Namecheap API client (Sandbox / Prod)
 ├─ pyproject.toml
 ├─ .env.example
-├─ README.md ← this file
+└─ README.md
 ```
 
 ---
