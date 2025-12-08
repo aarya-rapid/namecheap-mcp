@@ -1,57 +1,40 @@
-# Smithery configuration for the Namecheap domain search MCP server
+runtime: "container"
+
+build:
+  dockerfile: "Dockerfile"
+  dockerBuildPath: "."
 
 startCommand:
-  # Smithery will talk to this server over STDIO (recommended for Python MCP).
-  type: stdio
-
-  # What config fields Smithery should ask the user for
-  # when they deploy / use your server.
+  type: "http"
   configSchema:
-    type: object
+    type: "object"
     required:
       - NAMECHEAP_API_USER
       - NAMECHEAP_API_KEY
-      - NAMECHEAP_API_IP
-      - NAMECHEAP_ENV
+      - NAMECHEAP_USERNAME
+      - NAMECHEAP_CLIENT_IP
+      - NAMECHEAP_USE_SANDBOX
     properties:
       NAMECHEAP_API_USER:
-        type: string
-        title: "Namecheap API username"
-        description: "Your Namecheap API username (from the Namecheap control panel)."
+        type: "string"
+        title: "Namecheap API user"
       NAMECHEAP_API_KEY:
-        type: string
+        type: "string"
         title: "Namecheap API key"
-        description: "Your Namecheap API key. This will be injected into the container as an environment variable."
-      NAMECHEAP_API_IP:
-        type: string
-        title: "Whitelisted public IP"
-        description: "Public IP address whitelisted in Namecheap API settings."
-      NAMECHEAP_ENV:
-        type: string
-        title: "Environment"
-        description: "Use 'sandbox' for testing, 'production' for live lookups."
-        default: "sandbox"
-        enum:
-          - sandbox
-          - production
-
-  # How to start the MCP server process *inside* the container
-  # using the config values above.
-  commandFunction: |-
-    (config) => ({
-      command: 'python',
-      args: ['-m', 'src.stdio_server'],
-      env: {
-        NAMECHEAP_API_USER: config.NAMECHEAP_API_USER,
-        NAMECHEAP_API_KEY: config.NAMECHEAP_API_KEY,
-        NAMECHEAP_API_IP: config.NAMECHEAP_API_IP,
-        NAMECHEAP_ENV: config.NAMECHEAP_ENV
-      }
-    })
-
-  # Example values Smithery can show in the UI
+      NAMECHEAP_USERNAME:
+        type: "string"
+        title: "Namecheap account username"
+      NAMECHEAP_CLIENT_IP:
+        type: "string"
+        title: "Whitelisted client IP"
+        description: "Must match the IP whitelisted in Namecheap API settings."
+      NAMECHEAP_USE_SANDBOX:
+        type: "boolean"
+        title: "Use sandbox?"
+        description: "true = Namecheap sandbox API, false = production API."
   exampleConfig:
-    NAMECHEAP_API_USER: "sandbox-user"
+    NAMECHEAP_API_USER: "aaryarapid"
     NAMECHEAP_API_KEY: "nc_api_key_here"
-    NAMECHEAP_API_IP: "203.0.113.10"
-    NAMECHEAP_ENV: "sandbox"
+    NAMECHEAP_USERNAME: "aaryarapid"
+    NAMECHEAP_CLIENT_IP: "58.84.62.103"
+    NAMECHEAP_USE_SANDBOX: true
