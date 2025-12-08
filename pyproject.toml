@@ -16,6 +16,6 @@ dependencies = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-# Tell hatch where the package lives (src/ layout)
+# Tell hatch where the package lives
 [tool.hatch.build.targets.wheel]
-packages = ["src/namecheap_mcp"]
+packages = ["src"]
