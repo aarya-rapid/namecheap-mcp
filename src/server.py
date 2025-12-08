@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from .controllers.mcp_tools import mcp
-from .config import server_settings
+from .services.mcp_provider import mcp
+from .helper.config import server_settings
 
 
 def main() -> None:

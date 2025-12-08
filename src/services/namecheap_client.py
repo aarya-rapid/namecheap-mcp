@@ -6,7 +6,7 @@ from typing import List, Optional, Dict, Any
 import httpx
 import xml.etree.ElementTree as ET
 
-from ..config import namecheap_settings
+from ..helper.config import namecheap_settings
 
 
 @dataclass

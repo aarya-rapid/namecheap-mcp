@@ -6,8 +6,8 @@ from typing import List, Optional
 
 from rapidfuzz import fuzz
 
-from ..models.domain_models import DomainSuggestion, SearchDomainsOutput
-from ..repositories.namecheap_client import NamecheapClient
+from ..constants.schema import DomainSuggestion, SearchDomainsOutput
+from ..services.namecheap_client import NamecheapClient
 
 
 DEFAULT_TLDS = [".com", ".net", ".io", ".ai", ".dev", ".app"]

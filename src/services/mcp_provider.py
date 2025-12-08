@@ -4,8 +4,9 @@ from typing import List, Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from ..models.domain_models import SearchDomainsOutput
 from ..services.domain_search_service import DomainSearchService
+from ..constants.schema import SearchDomainsInput, SearchDomainsOutput
+
 
 mcp = FastMCP("namecheap-domains", json_response=True)
 _service = DomainSearchService()
