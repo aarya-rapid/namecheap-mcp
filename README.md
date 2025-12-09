@@ -1,7 +1,7 @@
 # Namecheap MCP – Domain Search Server (Official Namecheap API Variant)
 
-A Model Context Protocol (MCP) server that provides **domain search**, **fuzzy name suggestions**, and **live availability checks** using the **official Namecheap Domains API**.  
-It also returns **Namecheap buy links** for quick purchase.
+A Model Context Protocol (MCP) server that provides **domain search**, **fuzzy brand suggestions**, **live availability checks**, and **smart budget-based multi-domain selection** using the **official Namecheap Domains API**.  
+It also returns **Namecheap buy links** for instant checkout.
 
 This branch currently uses the **Namecheap Sandbox**, meaning:
 - Real availability results are returned
@@ -14,16 +14,28 @@ Switching to production only requires updating the `.env`.
 
 ## 🚀 Features
 
+### 🔍 Search & Suggestions
 - Natural language → domain name ideas  
   → `"cool ai studio"`, `"my portfolio"`, `"robotics tools"`
 - Exact match detection  
   → `apple.com`, `coolaistudio.io`, etc.
-- Smart branded variants  
+- Smart branding variants  
   → `getcoolaistudio.com`, `coolaistudiohq.io`, `trycoolaistudio.ai`
 - Official **Namecheap availability results**
-- Supports **premium domains**
-- **Buy links** auto-generated for each result
-- Fully async and batched queries (efficient usage of API limits)
+- Supports **premium domains** with full price breakdown and purchase URLs
+
+### 💰 Budget-Based Multi-Domain Selection (New)
+- Ask for **multiple domains at once**
+- Set a **budget**, and the system selects domains that fit within it
+- Always returns **as many domains as possible up to the requested count**
+- `feasible` flag indicates whether the full request fit within the budget
+- `min_possible_total` shows **the minimum required budget** to satisfy the request fully
+- Automatically searches up to **50 Namecheap candidates** to maximize matches
+
+### 🧰 Usability Upgrades
+- Input validation for MCP tools (`budget >= 0`, `count >= 1`)
+- Optional TLD filtering (e.g., `.com`, `.io`, `.ai`)
+- `include_taken` controls whether unavailable domains should be considered
 
 ---
 
@@ -31,34 +43,36 @@ Switching to production only requires updating the `.env`.
 
 | Layer | Role |
 |-------|-----|
-| **Controllers** | MCP -> service routing |
-| **Services** | Domain generation, similarity scoring, result shaping |
+| **Controllers** | MCP → service routing |
+| **Services** | Domain generation, similarity scoring, price computation, budget logic |
 | **Repositories** | Namecheap XML API integration |
-| **Models** | Pydantic schemas for structured I/O |
+| **Models** | Typed schema for structured I/O |
 | **Server** | MCP server using streamable HTTP transport |
 
-🟢 **Namecheap API is the source of truth** for domain availability  
-🟢 No purchasing is triggered, only purchase links are generated
+🟢 **Namecheap API is the source of truth** for availability and pricing  
+🟢 No domain purchasing is triggered — only purchase URLs are generated
 
 ---
 
 ## 📂 Project Structure
 
 ```
+
 namecheap-mcp/
 ├─ src/
-│  ├─ server.py                  # MCP boot / HTTP entrypoint
+│  ├─ server.py                       # MCP boot / HTTP entrypoint
 │  ├─ constants/
-│  │   └─ schema.py
+│  │   └─ schema.py                   # Output types (includes BudgetSelectionOutput)
 │  ├─ helper/
 │  │   └─ config.py
 │  └─ services/
-│      ├─ mcp_provider.py        # Exposes MCP tools to the server
-│      ├─ domain_search_service.py
-│      └─ namecheap_client.py    # Namecheap API client (Sandbox / Prod)
+│      ├─ mcp_provider.py             # Exposes MCP tools (search + budget search)
+│      ├─ domain_search_service.py    # Core search / price / budget logic
+│      └─ namecheap_client.py         # Namecheap XML API client
 ├─ pyproject.toml
 ├─ .env.example
 └─ README.md
+
 ```
 
 ---
@@ -67,13 +81,13 @@ namecheap-mcp/
 
 - Python 3.12+
 - `uv` (recommended) or Poetry
-- MCP-compatible client (Postman MCP / VS Code MCP)
+- MCP-compatible client (Postman MCP / Claude Desktop / VS Code MCP)
 
 ---
 
 ## 🔐 Sandbox Configuration
 
-Create a `.env`:
+Create `.env`:
 
 ```
 NAMECHEAP_API_USER=your_sandbox_api_user
@@ -86,8 +100,7 @@ MCP_HOST=0.0.0.0
 MCP_PORT=8000
 ```
 
-> IP must be whitelisted in Namecheap API Access settings.  
-> `.env` is ignored by git — do not commit credentials.
+> IP must be whitelisted in Namecheap API Access settings.
 
 ---
 
@@ -102,7 +115,7 @@ If everything is set correctly, logs will show:
 
 ```
 StreamableHTTP session manager started
-MCP tools registered: search_domains
+MCP tools registered: search_domains, search_domains_under_budget
 Running on [http://0.0.0.0:8000](http://0.0.0.0:8000)
 ```
 
@@ -113,61 +126,70 @@ Running on [http://0.0.0.0:8000](http://0.0.0.0:8000)
 1️⃣ Open Postman → **Connect to MCP**  
 2️⃣ Endpoint:
 ```
-http://localhost:8000
-```
-3️⃣ Execute:
-```
-search_domains
+[http://localhost:8000](http://localhost:8000)
 ````
 
-📌 Example request:
+### Available Tools
+
+| Tool | Purpose |
+|------|---------|
+| `search_domains` | Search for exact and similar domains |
+| `search_domains_under_budget` | Select multiple domains fitting inside a budget |
+
+---
+
+### 🔍 Example — domain search
 ```json
 {
   "query": "apple",
-  "max_results": 10
+  "max_results": 10,
+  "include_taken": true
 }
 ````
 
-📌 Response fields include:
+---
 
-* `exact_matches`
-* `similar_matches`
-* `available`
-* `is_premium`
-* `prices` (Premium and ICANN fields from Namecheap XML)
-* `namecheap_buy_url`
-* `raw` XML fields → exposed as attributes
-
-Sandbox example:
+### 💰 Example — multi-domain search under budget (New)
 
 ```json
-"prices": {
-  "premium_registration": 0.0,
-  "premium_renewal": 0.0,
-  "premium_transfer": 0.0,
-  "premium_restore": 0.0,
-  "icann_fee": 0.0
+{
+  "query": "cool ai studio",
+  "budget": 40,
+  "count": 20,
+  "include_taken": true
 }
 ```
 
-Production will return real pricing automatically.
+Response fields include:
+
+| Field                | Meaning                                         |
+| -------------------- | ----------------------------------------------- |
+| `requested_count`    | Number of domains requested                     |
+| `found_count`        | Number returned                                 |
+| `feasible`           | Full request satisfied under budget             |
+| `min_possible_total` | Minimum cost required for all requested domains |
+| `selected_domains[]` | Domain suggestions sorted cheapest first        |
+| `total_price`        | Sum of selected domains                         |
+| `remaining_budget`   | Budget minus total price                        |
 
 ---
 
 ## 📝 Notes
 
 * **No** domains are ever registered automatically.
-
-* Sandbox pricing values are placeholders, **not accurate values**.
-
-* Changing to production requires only:
+* Sandbox pricing values are placeholders and **not accurate**.
+* Switching to production requires only:
 
   ```
   NAMECHEAP_USE_SANDBOX=false
   ```
 
-  and updating API credentials (same API calls and functionality).
+  * real API credentials.
+* Supports chunked Namecheap queries (up to **50 domains per request** — official API limit).
+* Budget-based search respects:
 
-* Supports batching up to 50 domains per request for optimal throughput.
+  * TLD filters
+  * Availability filters
+  * Premium pricing (where supported)
 
 ---
