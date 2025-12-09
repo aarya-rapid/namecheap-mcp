@@ -16,7 +16,7 @@ _service = DomainSearchService()
 async def search_domains(
     query: str,
     tlds: List[str] = [],
-    max_results: int = 25,
+    max_results: int = 50,
     include_taken: bool = False,
 ) -> SearchDomainsOutput:
     """
@@ -52,6 +52,16 @@ async def search_domains_under_budget(
     - `count`: how many domains the user wants.
     - If fewer than `count` domains fit the budget, `found_count` will be lower.
     """
+
+    if budget < 0:
+        raise ValueError("Budget must be a non-negative number.")
+
+    if count <= 0:
+        raise ValueError("Count must be a positive integer.")
+    
+    if count > 50:
+        raise ValueError("Count cannot exceed 50 due to Namecheap API limits.")
+
     # Treat empty list as None internally, so the service can fall back to DEFAULT_TLDS
     tlds_arg = tlds or None
 

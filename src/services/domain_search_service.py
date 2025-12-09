@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import re
+import os
 from itertools import product
 from typing import List, Optional
+from dotenv import load_dotenv
 
 from rapidfuzz import fuzz
 
@@ -11,6 +13,9 @@ from ..services.namecheap_client import NamecheapClient
 
 
 DEFAULT_TLDS = [".com", ".net", ".io", ".ai", ".dev", ".app"]
+
+load_dotenv()
+NAMECHEAP_USE_SANDBOX = os.getenv("NAMECHEAP_USE_SANDBOX", "false").lower() == "true"
 
 
 def _normalize_query(raw: str) -> str:
@@ -112,7 +117,8 @@ class DomainSearchService:
             is_base_match = (sld == base)
             is_exact = is_explicit or is_base_match
 
-            if not include_taken and not res.available and not is_exact:
+            # if not include_taken and not res.available and not is_exact:
+            if not include_taken and not res.available:
                 continue
 
             prices = {
@@ -177,12 +183,12 @@ class DomainSearchService:
         max_results: int = 50,
     ) -> BudgetSelectionOutput:
         """
-        Run the normal domain search and then select up to `count` domains
-        such that the total registration cost stays <= `budget`.
+        Select exactly `count` domains under `budget` **if feasible**.
 
-        Pricing uses:
-            premium_registration + icann_fee
-        Only domains with a known premium_registration price are considered.
+        If infeasible (budget too small or not enough domains), we still return:
+        - feasible = False
+        - min_possible_total = minimal total price for `count` domains
+        and `selected_domains` will contain the N cheapest domains we found.
         """
         base_results = await self.search_domains(
             query=query,
@@ -196,11 +202,16 @@ class DomainSearchService:
         )
 
         def compute_price(s: DomainSuggestion) -> float | None:
-            prices = s["prices"]
+            prices = s["prices"] or {}
             reg = prices.get("premium_registration")
             icann = prices.get("icann_fee") or 0.0
+
             if reg is None:
+                if NAMECHEAP_USE_SANDBOX:
+                    return 0.0 + float(icann)
+                # In prod, still skip domains with no known price
                 return None
+
             try:
                 return float(reg) + float(icann)
             except (TypeError, ValueError):
@@ -212,31 +223,44 @@ class DomainSearchService:
             if price is not None:
                 priced.append((s, price))
 
-        # Sort by cheapest first
+        # Sort by price ascending
         priced.sort(key=lambda tup: tup[1])
 
-        selected: list[DomainSuggestion] = []
-        total_price = 0.0
+        # If we don't even have `count` priced domains, we can't satisfy the request
+        if len(priced) < count:
+            # Use all we have; this is automatically infeasible with respect
+            # to "exactly count domains".
+            selected_pairs = priced
+            min_possible_total = sum(price for _, price in selected_pairs)
+            total_price = min_possible_total
+            feasible = False
+        else:
+            # Cheapest possible set of size `count` is first `count` items.
+            selected_pairs = priced[:count]
+            min_possible_total = sum(price for _, price in selected_pairs)
 
-        for s, price in priced:
-            if len(selected) >= count:
-                break
-
-            if total_price + price <= budget:
-                selected.append(s)
-                total_price += price
+            if min_possible_total <= budget:
+                # ✅ Feasible: these `count` domains are under budget
+                total_price = min_possible_total
+                feasible = True
             else:
-                continue
+                # ❌ Infeasible: even the `count` cheapest exceed the budget.
+                # We still return them, but mark feasible=False.
+                total_price = min_possible_total
+                feasible = False
 
+        selected_domains: list[DomainSuggestion] = [s for (s, _) in selected_pairs]
+        found_count = len(selected_domains)
         remaining = budget - total_price
-        found_count = len(selected)
 
         return BudgetSelectionOutput(
             query=base_results["query"],
             budget=float(budget),
             requested_count=count,
             found_count=found_count,
-            selected_domains=selected,
+            selected_domains=selected_domains,
             total_price=total_price,
             remaining_budget=remaining,
+            feasible=feasible,
+            min_possible_total=min_possible_total,
         )

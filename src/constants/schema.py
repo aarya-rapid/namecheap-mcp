@@ -22,13 +22,13 @@ class SearchDomainsOutput(TypedDict):
 
 
 class BudgetSelectionOutput(TypedDict):
-    """
-    Result when selecting multiple domains under a given budget.
-    """
     query: str
     budget: float
-    requested_count: int          # how many the user asked for
-    found_count: int              # how many we actually found
+    requested_count: int
+    found_count: int
     selected_domains: List[DomainSuggestion]
     total_price: float
     remaining_budget: float
+    feasible: bool                # NEW: True if constraints can be satisfied
+    min_possible_total: float     # NEW: sum of N cheapest domains
+
