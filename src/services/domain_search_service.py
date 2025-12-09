@@ -6,7 +6,7 @@ from typing import List, Optional
 
 from rapidfuzz import fuzz
 
-from ..constants.schema import DomainSuggestion, SearchDomainsOutput
+from ..constants.schema import DomainSuggestion, SearchDomainsOutput, BudgetSelectionOutput
 from ..services.namecheap_client import NamecheapClient
 
 
@@ -165,4 +165,78 @@ class DomainSearchService:
             query=raw_query,
             exact_matches=exact,
             similar_matches=similar,
+        )
+    
+    async def search_domains_with_budget(
+        self,
+        query: str,
+        budget: float,
+        count: int,
+        tlds: Optional[List[str]] = None,
+        include_taken: bool = False,
+        max_results: int = 50,
+    ) -> BudgetSelectionOutput:
+        """
+        Run the normal domain search and then select up to `count` domains
+        such that the total registration cost stays <= `budget`.
+
+        Pricing uses:
+            premium_registration + icann_fee
+        Only domains with a known premium_registration price are considered.
+        """
+        base_results = await self.search_domains(
+            query=query,
+            tlds=tlds,
+            max_results=max_results,
+            include_taken=include_taken,
+        )
+
+        all_suggestions: list[DomainSuggestion] = (
+            list(base_results["exact_matches"]) + list(base_results["similar_matches"])
+        )
+
+        def compute_price(s: DomainSuggestion) -> float | None:
+            prices = s["prices"]
+            reg = prices.get("premium_registration")
+            icann = prices.get("icann_fee") or 0.0
+            if reg is None:
+                return None
+            try:
+                return float(reg) + float(icann)
+            except (TypeError, ValueError):
+                return None
+
+        priced: list[tuple[DomainSuggestion, float]] = []
+        for s in all_suggestions:
+            price = compute_price(s)
+            if price is not None:
+                priced.append((s, price))
+
+        # Sort by cheapest first
+        priced.sort(key=lambda tup: tup[1])
+
+        selected: list[DomainSuggestion] = []
+        total_price = 0.0
+
+        for s, price in priced:
+            if len(selected) >= count:
+                break
+
+            if total_price + price <= budget:
+                selected.append(s)
+                total_price += price
+            else:
+                continue
+
+        remaining = budget - total_price
+        found_count = len(selected)
+
+        return BudgetSelectionOutput(
+            query=base_results["query"],
+            budget=float(budget),
+            requested_count=count,
+            found_count=found_count,
+            selected_domains=selected,
+            total_price=total_price,
+            remaining_budget=remaining,
         )
