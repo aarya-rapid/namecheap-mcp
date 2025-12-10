@@ -12,7 +12,7 @@ from ..constants.schema import DomainSuggestion, SearchDomainsOutput, BudgetSele
 from ..services.namecheap_client import NamecheapClient
 
 
-DEFAULT_TLDS = [".com", ".net", ".io", ".ai", ".dev", ".app",".tech", ".co", ".org", ".info"]
+DEFAULT_TLDS_FALLBACK = [".com", ".net", ".io", ".ai", ".dev", ".app",".tech", ".co", ".org", ".info"]
 
 load_dotenv()
 NAMECHEAP_USE_SANDBOX = os.getenv("NAMECHEAP_USE_SANDBOX", "false").lower() == "true"
@@ -26,8 +26,8 @@ def _normalize_query(raw: str) -> str:
 
 
 def _generate_labels(base: str) -> list[str]:
-    prefixes = ["", "get", "try", "use"]
-    suffixes = ["", "app", "hq", "ai"]
+    prefixes = ["", "hey", "hello", "get", "try", "use", "buy" ,"go", "the", "real"]
+    suffixes = ["", "app", "ai", "shop", "store", "tech"]
     labels: set[str] = set()
     for pre, suf in product(prefixes, suffixes):
         labels.add(f"{pre}{base}{suf}")
@@ -86,6 +86,7 @@ def _extract_base_and_explicit(norm: str) -> tuple[str, str | None]:
 class DomainSearchService:
     def __init__(self, client: NamecheapClient | None = None) -> None:
         self._client = client or NamecheapClient()
+        self._default_tlds_cache: list[str] | None = None  # cache popular 
 
     async def search_domains(
         self,
@@ -98,7 +99,8 @@ class DomainSearchService:
         norm = _normalize_query(query)
 
         base, explicit_domain = _extract_base_and_explicit(norm)
-        tlds = tlds or DEFAULT_TLDS
+        if tlds is None:
+            tlds = await self._get_default_tlds()   
 
         domains = _build_domains(base, tlds, explicit_domain)
 
@@ -264,3 +266,47 @@ class DomainSearchService:
             feasible=feasible,
             min_possible_total=min_possible_total,
         )
+    
+    async def _get_default_tlds(self) -> list[str]:
+        """
+        Build a dynamic default TLD list using Namecheap's getTldList:
+
+        - Uses only API-registerable, non-disabled TLDs
+        - Orders by SequenceNumber (lower = more prominent in Namecheap UI)
+        - Takes the top N as "popular" defaults
+        - Caches the result for subsequent calls
+
+        In Sandbox, this still works but ordering/contents may not be realistic.
+        In Production, ordering should reflect Namecheap's real search behavior.
+        """
+        if self._default_tlds_cache is not None:
+            return self._default_tlds_cache
+
+        try:
+            tld_meta = await self._client.get_tld_list_with_meta()
+        except Exception:
+            # On any error, fall back to a static, safe list
+            self._default_tlds_cache = DEFAULT_TLDS_FALLBACK
+            return self._default_tlds_cache
+
+        if not tld_meta:
+            self._default_tlds_cache = DEFAULT_TLDS_FALLBACK
+            return self._default_tlds_cache
+
+        # tld_meta is already sorted by sequence, but re-sort just to be safe
+        tld_meta.sort(key=lambda x: x["sequence"])
+
+        # Only keep TLDs the API can actually register and that aren't disabled
+        usable = [
+            m for m in tld_meta
+            if m.get("is_api_registerable") and not m.get("is_disabled_registration")
+        ]
+
+        # Take the top N as "popular" default TLDs
+        TOP_N = 15
+        popular = usable[:TOP_N]
+
+        # Convert to ".com" style strings
+        self._default_tlds_cache = [f".{m['name']}" for m in popular]
+        return self._default_tlds_cache
+

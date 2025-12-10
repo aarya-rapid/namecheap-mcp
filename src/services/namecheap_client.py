@@ -245,3 +245,66 @@ class NamecheapClient:
             all_results.extend(chunk_results)
 
         return all_results
+    
+    async def get_tld_list_with_meta(self) -> list[dict[str, object]]:
+        """
+        Fetch TLDs + metadata (including SequenceNumber) from Namecheap.
+
+        Returns a list of dicts like:
+        {
+            "name": "com",
+            "sequence": 10,
+            "is_api_registerable": True,
+            "is_disabled_registration": False,
+        }
+
+        The list is sorted by SequenceNumber ascending (lower = shown earlier in UI).
+        """
+        xml_text = await self._request(
+            "namecheap.domains.getTldList",
+            extra={},
+        )
+
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError:
+            # On error, return empty; caller can fall back to a static list
+            return []
+
+        # Handle namespace or no-namespace cases
+        if root.tag.startswith("{"):
+            ns_uri = root.tag.split("}", 1)[0].strip("{")
+            ns = {"nc": ns_uri}
+            find_expr = ".//nc:Tld"
+        else:
+            ns = {}
+            find_expr = ".//Tld"
+
+        items: list[dict[str, object]] = []
+
+        for elem in root.findall(find_expr, ns):
+            name = elem.get("Name")
+            if not name:
+                continue
+
+            seq_raw = elem.get("SequenceNumber", "999999")
+            try:
+                sequence = int(seq_raw)
+            except ValueError:
+                sequence = 999999
+
+            is_api_reg = (elem.get("IsApiRegisterable", "").lower() == "true")
+            is_disabled_reg = (elem.get("IsDisableRegistration", "").lower() == "true")
+
+            items.append(
+                {
+                    "name": name.lower(),
+                    "sequence": sequence,
+                    "is_api_registerable": is_api_reg,
+                    "is_disabled_registration": is_disabled_reg,
+                }
+            )
+
+        # Sort by Namecheap's UI order (lower sequence first)
+        items.sort(key=lambda x: x["sequence"])
+        return items
