@@ -12,7 +12,7 @@ from ..constants.schema import DomainSuggestion, SearchDomainsOutput, BudgetSele
 from ..services.namecheap_client import NamecheapClient
 
 
-DEFAULT_TLDS = [".com", ".net", ".io", ".ai", ".dev", ".app"]
+DEFAULT_TLDS = [".com", ".net", ".io", ".ai", ".dev", ".app",".tech", ".co", ".org", ".info"]
 
 load_dotenv()
 NAMECHEAP_USE_SANDBOX = os.getenv("NAMECHEAP_USE_SANDBOX", "false").lower() == "true"
