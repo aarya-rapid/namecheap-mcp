@@ -5,6 +5,8 @@ import os
 from itertools import product
 from typing import List, Optional
 from dotenv import load_dotenv
+import time
+from ..helper.config import namecheap_settings as _ncfg
 
 from rapidfuzz import fuzz
 
@@ -16,6 +18,9 @@ DEFAULT_TLDS_FALLBACK = [".com", ".net", ".io", ".ai", ".dev", ".app",".tech", "
 
 load_dotenv()
 NAMECHEAP_USE_SANDBOX = os.getenv("NAMECHEAP_USE_SANDBOX", "false").lower() == "true"
+
+# sandbox flag
+use_sandbox = getattr(_ncfg, "use_sandbox", False) or getattr(_ncfg, "NAMECHEAP_USE_SANDBOX", False)
 
 
 def _normalize_query(raw: str) -> str:
@@ -86,7 +91,11 @@ def _extract_base_and_explicit(norm: str) -> tuple[str, str | None]:
 class DomainSearchService:
     def __init__(self, client: NamecheapClient | None = None) -> None:
         self._client = client or NamecheapClient()
-        self._default_tlds_cache: list[str] | None = None  # cache popular 
+        self._default_tlds_cache: list[str] | None = None  # cache popular
+        self._tld_pricing_cache: dict[str, dict] | None = None
+        self._tld_pricing_cache_ts: float | None = None
+        self._tld_pricing_cache_ttl = 60 * 60  # 1 hour
+
 
     async def search_domains(
         self,
@@ -147,6 +156,77 @@ class DomainSearchService:
                 )
             )
 
+        # ------- defensive merge block (drop-in) -------
+
+        tlds_needed = sorted({s["tld"].lstrip(".").lower() for s in suggestions})
+        now = time.time()
+        need_fetch = False
+        if not self._tld_pricing_cache or not self._tld_pricing_cache_ts or (now - self._tld_pricing_cache_ts) > self._tld_pricing_cache_ttl:
+            need_fetch = True
+        else:
+            missing = [t for t in tlds_needed if t not in self._tld_pricing_cache]
+            if missing:
+                need_fetch = True
+
+        if need_fetch and tlds_needed:
+            try:
+                fetched = await self._client.get_pricing_for_tlds(tlds_needed, concurrency=6)
+                if not self._tld_pricing_cache:
+                    self._tld_pricing_cache = {}
+                for k, v in fetched.items():
+                    self._tld_pricing_cache[k] = v or {}
+                self._tld_pricing_cache_ts = time.time()
+            except Exception as e:
+                print("DEBUG: get_pricing_for_tlds failed:", repr(e))
+
+        pricing_map = self._tld_pricing_cache or {}
+        use_sandbox = getattr(_ncfg, "use_sandbox", False) or getattr(_ncfg, "NAMECHEAP_USE_SANDBOX", False)
+
+        # debug optional: print available keys (remove in prod)
+        try:
+            print("DEBUG: pricing_map keys:", sorted(list(pricing_map.keys()))[:30], "count:", len(pricing_map))
+        except Exception:
+            pass
+
+        for s in suggestions:
+            prices = s.get("prices") or {}
+            tld_name = s["tld"].lstrip(".").lower()
+
+            # prefer premium registration if present
+            prem = prices.get("premium_registration")
+            reg = None
+            if prem is not None and float(prem) > 0:
+                reg = float(prem)
+            else:
+                # look in cached tld pricing
+                tinfo = pricing_map.get(tld_name)
+                if tinfo:
+                    reg = tinfo.get("register")
+
+            # If still missing, do one-shot per-tld fetch and populate cache
+            if reg is None:
+                try:
+                    raw, parsed = await self._client.get_pricing_for_tld(tld_name)
+                    if parsed and parsed.get("register") is not None:
+                        reg = parsed["register"]
+                        self._tld_pricing_cache = self._tld_pricing_cache or {}
+                        self._tld_pricing_cache[tld_name] = parsed
+                        self._tld_pricing_cache_ts = time.time()
+                    else:
+                        if raw and "<price" in raw.lower():
+                            print(f"DEBUG: raw returned for {tld_name} but parsed empty. snippet:", raw[:500].replace('\n','\\n'))
+                except Exception as e:
+                    print("DEBUG: per-tld get_pricing_for_tld failed for", tld_name, "err:", repr(e))
+
+            if reg is not None:
+                prices["registration"] = float(reg)
+            else:
+                prices["registration"] = 0.0 if use_sandbox else None
+
+            s["prices"] = prices
+        # ------- end defensive merge -------
+
+
         # --- NEW: split into exact/similar first, then sort/limit ---
 
         exact = [s for s in suggestions if s["kind"] == "exact"]
@@ -203,21 +283,18 @@ class DomainSearchService:
             list(base_results["exact_matches"]) + list(base_results["similar_matches"])
         )
 
-        def compute_price(s: DomainSuggestion) -> float | None:
-            prices = s["prices"] or {}
-            reg = prices.get("premium_registration")
-            icann = prices.get("icann_fee") or 0.0
-
+        def compute_price(s):
+            prices = s.get("prices") or {}
+            # premium wins only if positive premium price is present
+            if s.get("is_premium"):
+                prem = prices.get("premium_registration")
+                if prem is not None and float(prem) > 0:
+                    return float(prem) + float(prices.get("icann_fee") or 0.0)
+            # else tld-level registration
+            reg = prices.get("registration")
             if reg is None:
-                if NAMECHEAP_USE_SANDBOX:
-                    return 0.0 + float(icann)
-                # In prod, still skip domains with no known price
-                return None
-
-            try:
-                return float(reg) + float(icann)
-            except (TypeError, ValueError):
-                return None
+                return 0.0 if use_sandbox else None
+            return float(reg) + float(prices.get("icann_fee") or 0.0)
 
         priced: list[tuple[DomainSuggestion, float]] = []
         for s in all_suggestions:

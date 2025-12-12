@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Dict, Any
-
+from typing import List, Optional, Dict, Any, Tuple
+import time
 import httpx
 import xml.etree.ElementTree as ET
+import re
+import asyncio
 
 from ..helper.config import namecheap_settings
 
@@ -56,6 +58,10 @@ class NamecheapClient:
         self.username = namecheap_settings.username
         self.client_ip = namecheap_settings.client_ip
         self.base_url = namecheap_settings.base_url
+        # caching for pricing: (timestamp, data)
+        self._pricing_cache: dict[str, dict] | None = None
+        self._pricing_cache_ts: float | None = None
+        self._pricing_cache_ttl_seconds: int = 60 * 60  # 1 hour
 
         missing = [
             key for key, value in {
@@ -308,3 +314,272 @@ class NamecheapClient:
         # Sort by Namecheap's UI order (lower sequence first)
         items.sort(key=lambda x: x["sequence"])
         return items
+
+    async def get_pricing(self, product_type: str = "DOMAIN", use_cache: bool = True) -> Tuple[Dict[str, Dict[str, float]], str]:
+        """
+        Robust pricing fetch with retry + backoff and sane timeouts.
+        Returns (pricing_map, raw_xml).
+        Tries a targeted REGISTER request first (smaller payload), then falls back to full ProductType if necessary.
+        """
+        now = time.time()
+        if use_cache and getattr(self, "_pricing_cache", None) and getattr(self, "_pricing_cache_ts", None):
+            if now - self._pricing_cache_ts < getattr(self, "_pricing_cache_ttl_seconds", 3600):
+                return self._pricing_cache, getattr(self, "_pricing_cache_raw", "")
+
+        async def _do_http_get(params: Dict[str, Any], timeout_seconds: float) -> str:
+            # Construct final params with API auth
+            full_params = self._build_params("namecheap.users.getPricing", params)
+            try:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds)) as client:
+                    resp = await client.get(self.base_url, params=full_params)
+                    resp.raise_for_status()
+                    return resp.text
+            except Exception:
+                # bubble up
+                raise
+
+        raw = ""
+        pricing: Dict[str, Dict[str, float]] = {}
+
+        # Attempt 1: smaller query for REGISTER only (usually much faster/smaller)
+        try:
+            tries = 3
+            backoff = 0.5
+            for attempt in range(1, tries + 1):
+                try:
+                    print(f"DEBUG get_pricing: trying REGISTER (attempt {attempt})")
+                    raw = await _do_http_get({"ProductType": product_type, "ActionName": "REGISTER"}, timeout_seconds=20.0)
+                    if raw:
+                        break
+                except Exception as e:
+                    print(f"DEBUG get_pricing REGISTER attempt {attempt} failed: {repr(e)}")
+                    if attempt < tries:
+                        await asyncio.sleep(backoff)
+                        backoff *= 2
+                    else:
+                        raw = ""  # will fall through to broader attempt
+        except Exception as outer:
+            print("DEBUG get_pricing REGISTER phase exception:", repr(outer))
+            raw = ""
+
+        # If REGISTER attempt produced nothing, try full ProductType (longer timeout)
+        if not raw:
+            try:
+                tries = 2
+                backoff = 1.0
+                for attempt in range(1, tries + 1):
+                    try:
+                        print(f"DEBUG get_pricing: trying FULL ProductType (attempt {attempt})")
+                        raw = await _do_http_get({"ProductType": product_type}, timeout_seconds=60.0)
+                        if raw:
+                            break
+                    except Exception as e:
+                        print(f"DEBUG get_pricing FULL attempt {attempt} failed: {repr(e)}")
+                        if attempt < tries:
+                            await asyncio.sleep(backoff)
+                            backoff *= 2
+                        else:
+                            raw = ""
+            except Exception as outer2:
+                print("DEBUG get_pricing FULL phase exception:", repr(outer2))
+                raw = ""
+
+        # If still nothing, return previous cache if any and an empty raw string
+        if not raw:
+            return getattr(self, "_pricing_cache", {}) or {}, getattr(self, "_pricing_cache_raw", "")
+
+        # store raw for debugging
+        self._pricing_cache_raw = raw
+
+        # --- Parsing: strip namespaces then parse ProductType -> ProductCategory -> Product -> Price ---
+        try:
+            # Remove namespace declarations to make element lookups simpler (safe for our parsing)
+            raw_no_ns = re.sub(r'\s+xmlns(:\w+)?="[^"]+"', '', raw, count=0)
+            root = ET.fromstring(raw_no_ns)
+        except ET.ParseError:
+            # Malformed XML — return raw so we can inspect it
+            return {}, raw
+
+        # helpers
+        def _to_float(s: str) -> float | None:
+            if s is None:
+                return None
+            s = str(s).strip()
+            if s == "":
+                return None
+            cleaned = re.sub(r"[^\d\.]", "", s)
+            try:
+                return float(cleaned)
+            except Exception:
+                return None
+
+        pricing = {}
+
+        # Find ProductType nodes (no namespace now)
+        for pt in root.findall(".//ProductType"):
+            pt_name = (pt.get("Name") or "").strip().upper()
+            if pt_name != product_type.upper():
+                continue
+
+            # Iterate ProductCategory children (REGISTER, RENEW, etc.)
+            for pcat in pt.findall(".//ProductCategory"):
+                cat_name = (pcat.get("Name") or "").strip().upper()
+                if not cat_name:
+                    continue
+                cat_key = "register" if cat_name == "REGISTER" else ("renew" if cat_name == "RENEW" else cat_name.lower())
+
+                # Iterate Product nodes under this category
+                for prod in pcat.findall(".//Product"):
+                    tld = (prod.get("Name") or "").strip().lower()
+                    if not tld:
+                        continue
+
+                    # Look for <Price> children and prefer Duration="1"
+                    chosen_price = None
+                    for pnode in prod.findall(".//Price"):
+                        duration = pnode.get("Duration")
+                        duration_type = (pnode.get("DurationType") or "").upper()
+                        # try Price, then YourPrice, then RegularPrice
+                        price_val = pnode.get("Price") or pnode.get("YourPrice") or pnode.get("RegularPrice")
+                        f = _to_float(price_val)
+                        if f is not None:
+                            if duration == "1" and (duration_type == "YEAR" or duration_type == ""):
+                                chosen_price = f
+                                break
+                            if chosen_price is None:
+                                chosen_price = f
+
+                    if chosen_price is not None:
+                        pricing.setdefault(tld, {})[cat_key] = chosen_price
+
+        # cache and return
+        self._pricing_cache = pricing
+        self._pricing_cache_ts = time.time()
+        return pricing, raw
+
+
+    async def get_pricing_for_tld(
+        self,
+        tld: str,
+        product_category: str = "REGISTER",
+        timeout: float = 20.0,
+        try_actionname: bool = True,
+    ) -> Tuple[str, Dict[str, float]]:
+        """
+        Fetch pricing for a single TLD (e.g., "com").
+        Tries multiple parameter names to be defensive:
+        - ProductCategory=REGISTER
+        - ActionName=REGISTER (if try_actionname=True)
+        Returns (raw_xml, parsed_entry) where parsed_entry is like {"register": 9.98} or {}.
+        """
+        import re, xml.etree.ElementTree as ET
+
+        tld = (tld or "").strip().lower()
+        if not tld:
+            return "", {}
+
+        params_variants = [
+            {"ProductType": "DOMAIN", "ProductCategory": product_category, "ProductName": tld.upper()},
+        ]
+        if try_actionname:
+            params_variants.append({"ProductType": "DOMAIN", "ActionName": product_category, "ProductName": tld.upper()})
+        # Also try ProductName lowercase variant if provider expects that
+        params_variants.append({"ProductType": "DOMAIN", "ProductCategory": product_category, "ProductName": tld})
+
+        last_raw = ""
+        parsed: Dict[str, float] = {}
+
+        for params in params_variants:
+            try:
+                last_raw = await self._request("namecheap.users.getPricing", params)
+            except Exception as e:
+                # keep going to next variant, but continue (do not raise)
+                # you can uncomment the print to debug: print("get_pricing_for_tld request failed:", repr(e))
+                last_raw = ""
+                continue
+
+            if not last_raw:
+                continue
+
+            # Strip namespaces to simplify tag access
+            try:
+                raw_no_ns = re.sub(r'\s+xmlns(:\w+)?="[^"]+"', '', last_raw, count=0)
+                root = ET.fromstring(raw_no_ns)
+            except Exception:
+                # If xml parsing fails, return raw and empty parsed so caller can inspect raw
+                return last_raw, {}
+
+            # Find ProductType that matches domain(s)
+            found = False
+            for pt in root.findall(".//ProductType"):
+                pt_name = (pt.get("Name") or "").strip().lower()
+                if pt_name not in ("domain", "domains"):
+                    continue
+                # iterate product categories and products
+                for pcat in pt.findall(".//ProductCategory"):
+                    cat_name = (pcat.get("Name") or "").strip().lower()
+                    # accept register OR product_category lowercase
+                    if cat_name != product_category.lower():
+                        continue
+                    for prod in pcat.findall(".//Product"):
+                        prod_name = (prod.get("Name") or "").strip().lower()
+                        if prod_name != tld:
+                            continue
+                        # find Price nodes and prefer Duration="1"
+                        chosen = None
+                        for pnode in prod.findall(".//Price"):
+                            duration = (pnode.get("Duration") or "").strip()
+                            price_val = pnode.get("Price") or pnode.get("YourPrice") or pnode.get("RegularPrice")
+                            if not price_val:
+                                continue
+                            try:
+                                price_f = float(re.sub(r"[^\d\.]", "", str(price_val)))
+                            except Exception:
+                                continue
+                            if duration == "1":
+                                chosen = price_f
+                                break
+                            if chosen is None:
+                                chosen = price_f
+                        if chosen is not None:
+                            parsed["register"] = chosen
+                            found = True
+                            break
+                    if found:
+                        break
+                if found:
+                    break
+
+            if parsed:
+                # success
+                return last_raw, parsed
+            # else try next param variant
+
+        # nothing found in any variant — return last_raw for diagnostics and empty parsed
+        return last_raw, {}
+
+
+
+    async def get_pricing_for_tlds(self, tlds: List[str], concurrency: int = 4) -> Dict[str, Dict[str, float]]:
+        """
+        Fetch pricing for multiple TLDs concurrently (bounded).
+        Returns mapping { 'com': {'register': 9.98}, 'io': {...}, ... }
+        """
+        sem = asyncio.Semaphore(concurrency)
+        results: Dict[str, Dict[str, float]] = {}
+
+        async def _fetch_one(tld: str):
+            async with sem:
+                try:
+                    raw, parsed = await self.get_pricing_for_tld(tld)
+                    if parsed:
+                        results[tld.lower()] = parsed
+                    else:
+                        # empty parse — still mark as empty so caller knows we attempted
+                        results[tld.lower()] = {}
+                except Exception as e:
+                    # network / timeout — leave out of results (caller will fallback)
+                    results.setdefault(tld.lower(), {})
+
+        await asyncio.gather(*[ _fetch_one(t) for t in tlds ])
+        return results

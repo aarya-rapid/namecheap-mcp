@@ -9,8 +9,8 @@ async def main() -> None:
     client = NamecheapClient()
     tlds = await client.get_tld_list_with_meta()
 
-    print("Top 30 TLDs by SequenceNumber (lower = shown earlier):\n")
-    for item in tlds[:30]:
+    print("Top 10 TLDs by SequenceNumber (lower = shown earlier):\n")
+    for item in tlds[:10]:
         name = item["name"]
         seq = item["sequence"]
         api = item["is_api_registerable"]
